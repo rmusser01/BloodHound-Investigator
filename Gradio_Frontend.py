@@ -7,10 +7,9 @@ import json
 import os
 import logging
 from dotenv import load_dotenv
-from pydantic import BaseModel, EmailStr, conint, ValidationError
 
 # Import functions from the backend
-from email_analyzer_backend import (
+from email_analyzer_app import (
     analyze_sentiment,
     perform_topic_modeling,
     get_emails_by_topic,
@@ -21,23 +20,20 @@ from email_analyzer_backend import (
     export_data_csv,
     semantic_search,
     check_red_flags,
-    batch_check_red_flags,
-    get_red_flagged_emails,
-    classify_and_store_source,
-    batch_classify_sources,
-    get_emails_by_classification,
-    get_classification_statistics,
-    close_db_connections
+    check_data_integrity,
+    app_monitor
 )
+
+# Load environment variables
+load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Input validation models (you might want to move these to a separate file)
+from pydantic import BaseModel, EmailStr, conint, constr, ValidationError
 
-# Input validation models
 class EmailID(BaseModel):
     email_id: conint(gt=0)
 
@@ -45,15 +41,24 @@ class TopicModel(BaseModel):
     n_topics: conint(gt=1, lt=100)
 
 class SearchQuery(BaseModel):
-    query: str
+    query: constr(min_length=1, max_length=200)
+
+# Utility function for input validation
+def validate_input(input_data, model):
+    try:
+        validated_data = model(**input_data)
+        return validated_data
+    except ValidationError as e:
+        logger.error(f"Validation error: {e}")
+        raise ValueError(str(e))
 
 # Gradio interface functions with error handling and input validation
 def analyze_sentiment_interface(email_id):
     try:
-        EmailID(email_id=email_id)
+        validate_input({"email_id": email_id}, EmailID)
         result = analyze_sentiment(email_id)
         return f"Sentiment: {result['sentiment']}\nScore: {result['score']:.2f}\nSubjectivity: {result['subjectivity']:.2f}"
-    except ValidationError as e:
+    except ValueError as e:
         return f"Invalid input: {str(e)}"
     except Exception as e:
         logger.error(f"Error in analyze_sentiment_interface: {e}")
@@ -61,21 +66,22 @@ def analyze_sentiment_interface(email_id):
 
 def perform_topic_modeling_interface(n_topics):
     try:
-        TopicModel(n_topics=n_topics)
+        validate_input({"n_topics": n_topics}, TopicModel)
         topics = perform_topic_modeling(n_topics=n_topics)
         return "\n".join([f"Topic {t['id']}: {', '.join(t['top_words'])}" for t in topics])
-    except ValidationError as e:
+    except ValueError as e:
         return f"Invalid input: {str(e)}"
     except Exception as e:
         logger.error(f"Error in perform_topic_modeling_interface: {e}")
         return f"An error occurred: {str(e)}"
 
+
 def get_emails_by_topic_interface(topic_id):
     try:
-        EmailID(email_id=topic_id)  # Reusing EmailID for topic_id validation
+        validate_input({"email_id": topic_id}, EmailID)  # Reusing EmailID for topic_id validation
         emails = get_emails_by_topic(topic_id)
         return "\n\n".join([f"ID: {e[0]}, Subject: {e[1]}, Date: {e[2]}" for e in emails])
-    except ValidationError as e:
+    except ValueError as e:
         return f"Invalid input: {str(e)}"
     except Exception as e:
         logger.error(f"Error in get_emails_by_topic_interface: {e}")
@@ -155,6 +161,7 @@ def generate_report_interface(output_file):
         logger.error(f"Error in generate_report_interface: {e}")
         return f"An error occurred: {str(e)}"
 
+
 def export_data_csv_interface():
     try:
         csv_data = export_data_csv()
@@ -165,10 +172,10 @@ def export_data_csv_interface():
 
 def perform_semantic_search_interface(query):
     try:
-        SearchQuery(query=query)
+        validate_input({"query": query}, SearchQuery)
         results = semantic_search(query)
         return "\n\n".join([f"ID: {r[0]}, Subject: {r[1]}, Similarity: {r[2]:.4f}" for r in results])
-    except ValidationError as e:
+    except ValueError as e:
         return f"Invalid input: {str(e)}"
     except Exception as e:
         logger.error(f"Error in perform_semantic_search_interface: {e}")
@@ -176,101 +183,114 @@ def perform_semantic_search_interface(query):
 
 def check_red_flags_interface(email_id):
     try:
-        EmailID(email_id=email_id)
+        validate_input({"email_id": email_id}, EmailID)
         flags = check_red_flags(email_id)
         if flags:
             return f"Red flags found: {', '.join(flags)}"
         else:
             return "No red flags found."
-    except ValidationError as e:
+    except ValueError as e:
         return f"Invalid input: {str(e)}"
     except Exception as e:
         logger.error(f"Error in check_red_flags_interface: {e}")
         return f"An error occurred: {str(e)}"
 
-def batch_check_red_flags_interface():
+def check_data_integrity_interface():
     try:
-        count = batch_check_red_flags()
-        return f"Checked all emails. Found {count} emails with red flags."
+        issues = check_data_integrity()
+        if issues:
+            return "Data integrity issues found:\n" + "\n".join(issues)
+        else:
+            return "No data integrity issues found."
     except Exception as e:
-        logger.error(f"Error in batch_check_red_flags_interface: {e}")
+        logger.error(f"Error in check_data_integrity_interface: {e}")
         return f"An error occurred: {str(e)}"
 
-def get_red_flagged_emails_interface():
+def get_application_stats_interface():
     try:
-        emails = get_red_flagged_emails()
-        return "\n\n".join([f"ID: {e[0]}, Subject: {e[1]}, Date: {e[2]}, Flags: {', '.join(e[3])}" for e in emails])
+        stats = app_monitor.get_stats()
+        return json.dumps(stats, indent=2)
     except Exception as e:
-        logger.error(f"Error in get_red_flagged_emails_interface: {e}")
+        logger.error(f"Error in get_application_stats_interface: {e}")
         return f"An error occurred: {str(e)}"
 
 # Gradio interface
-with gr.Blocks() as demo:
-    gr.Markdown("# Email Analyzer for Journalists")
+def create_gradio_interface():
+    with gr.Blocks() as demo:
+        gr.Markdown("# Email Analyzer for Journalists")
 
-    with gr.Tab("Sentiment Analysis"):
-        email_id_input = gr.Number(label="Email ID")
-        analyze_sentiment_button = gr.Button("Analyze Sentiment")
-        sentiment_output = gr.Textbox(label="Sentiment Analysis Result")
-        analyze_sentiment_button.click(analyze_sentiment_interface, inputs=email_id_input, outputs=sentiment_output)
+        with gr.Tab("Sentiment Analysis"):
+            email_id_input = gr.Number(label="Email ID")
+            analyze_sentiment_button = gr.Button("Analyze Sentiment")
+            sentiment_output = gr.Textbox(label="Sentiment Analysis Result")
+            analyze_sentiment_button.click(analyze_sentiment_interface, inputs=email_id_input, outputs=sentiment_output)
 
-    with gr.Tab("Topic Modeling"):
-        n_topics_input = gr.Slider(minimum=2, maximum=20, step=1, label="Number of Topics", value=5)
-        perform_topic_modeling_button = gr.Button("Perform Topic Modeling")
-        topic_modeling_output = gr.Textbox(label="Topics")
-        perform_topic_modeling_button.click(perform_topic_modeling_interface, inputs=n_topics_input, outputs=topic_modeling_output)
+        with gr.Tab("Topic Modeling"):
+            n_topics_input = gr.Slider(minimum=2, maximum=20, step=1, label="Number of Topics", value=5)
+            perform_topic_modeling_button = gr.Button("Perform Topic Modeling")
+            topic_modeling_output = gr.Textbox(label="Topics")
+            perform_topic_modeling_button.click(perform_topic_modeling_interface, inputs=n_topics_input, outputs=topic_modeling_output)
 
-        gr.Markdown("### View Emails by Topic")
-        topic_id_input = gr.Number(label="Topic ID")
-        view_topic_button = gr.Button("View Emails in Topic")
-        topic_emails_output = gr.Textbox(label="Emails in Topic")
-        view_topic_button.click(get_emails_by_topic_interface, inputs=topic_id_input, outputs=topic_emails_output)
+            gr.Markdown("### View Emails by Topic")
+            topic_id_input = gr.Number(label="Topic ID")
+            view_topic_button = gr.Button("View Emails in Topic")
+            topic_emails_output = gr.Textbox(label="Emails in Topic")
+            view_topic_button.click(get_emails_by_topic_interface, inputs=topic_id_input, outputs=topic_emails_output)
 
-    with gr.Tab("Relationship Mapping"):
-        build_graph_button = gr.Button("Build Relationship Graph")
-        build_graph_output = gr.Textbox(label="Graph Building Result")
-        build_graph_button.click(build_relationship_graph_interface, outputs=build_graph_output)
+        with gr.Tab("Relationship Mapping"):
+            build_graph_button = gr.Button("Build Relationship Graph")
+            build_graph_output = gr.Textbox(label="Graph Building Result")
+            build_graph_button.click(build_relationship_graph_interface, outputs=build_graph_output)
 
-        visualize_button = gr.Button("Visualize Relationships")
-        relationship_graph = gr.Plot(label="Relationship Graph")
-        visualize_button.click(visualize_relationships_interface, outputs=relationship_graph)
+            visualize_button = gr.Button("Visualize Relationships")
+            relationship_graph = gr.Plot(label="Relationship Graph")
+            visualize_button.click(visualize_relationships_interface, outputs=relationship_graph)
 
-        most_connected_button = gr.Button("Show Most Connected Entities")
-        most_connected_output = gr.Textbox(label="Most Connected Entities")
-        most_connected_button.click(get_most_connected_entities_interface, outputs=most_connected_output)
+            most_connected_button = gr.Button("Show Most Connected Entities")
+            most_connected_output = gr.Textbox(label="Most Connected Entities")
+            most_connected_button.click(get_most_connected_entities_interface, outputs=most_connected_output)
 
-    with gr.Tab("Export and Report"):
-        report_output_file = gr.Textbox(label="Report Output File Name (e.g., report.pdf)")
-        generate_report_button = gr.Button("Generate Report")
-        report_output = gr.Textbox(label="Report Generation Result")
-        generate_report_button.click(generate_report_interface, inputs=report_output_file, outputs=report_output)
+        with gr.Tab("Report Generation"):
+            report_output_file = gr.Textbox(label="Report Output File Name (e.g., report.pdf)")
+            generate_report_button = gr.Button("Generate Report")
+            report_output = gr.Textbox(label="Report Generation Result")
+            generate_report_button.click(generate_report_interface, inputs=report_output_file, outputs=report_output)
 
-        export_csv_button = gr.Button("Export Data as CSV")
-        csv_output = gr.File(label="Exported CSV Data")
-        export_csv_button.click(export_data_csv_interface, outputs=csv_output)
+        with gr.Tab("Data Export"):
+            export_csv_button = gr.Button("Export Data as CSV")
+            csv_output = gr.File(label="Exported CSV Data")
+            export_csv_button.click(export_data_csv_interface, outputs=csv_output)
 
-    with gr.Tab("Semantic Search"):
-        search_query = gr.Textbox(label="Search Query")
-        search_button = gr.Button("Perform Semantic Search")
-        search_results = gr.Textbox(label="Search Results")
-        search_button.click(perform_semantic_search_interface, inputs=search_query, outputs=search_results)
+        with gr.Tab("Semantic Search"):
+            search_query = gr.Textbox(label="Search Query")
+            search_button = gr.Button("Perform Semantic Search")
+            search_results = gr.Textbox(label="Search Results")
+            search_button.click(perform_semantic_search_interface, inputs=search_query, outputs=search_results)
 
-    with gr.Tab("Red Flag Tagging"):
-        email_id_input = gr.Number(label="Email ID")
-        check_flags_button = gr.Button("Check Red Flags")
-        flags_output = gr.Textbox(label="Red Flags Result")
-        check_flags_button.click(check_red_flags_interface, inputs=email_id_input, outputs=flags_output)
+        with gr.Tab("Red Flag Detection"):
+            red_flag_email_id = gr.Number(label="Email ID")
+            check_red_flags_button = gr.Button("Check Red Flags")
+            red_flags_output = gr.Textbox(label="Red Flags Result")
+            check_red_flags_button.click(check_red_flags_interface, inputs=red_flag_email_id, outputs=red_flags_output)
 
-        batch_check_button = gr.Button("Batch Check All Emails")
-        batch_check_output = gr.Textbox(label="Batch Check Result")
-        batch_check_button.click(batch_check_red_flags_interface, outputs=batch_check_output)
+        with gr.Tab("Data Integrity"):
+            check_integrity_button = gr.Button("Check Data Integrity")
+            integrity_output = gr.Textbox(label="Integrity Check Result")
+            check_integrity_button.click(check_data_integrity_interface, outputs=integrity_output)
 
-        view_flagged_button = gr.Button("View Red Flagged Emails")
-        flagged_emails_output = gr.Textbox(label="Red Flagged Emails")
-        view_flagged_button.click(get_red_flagged_emails_interface, outputs=flagged_emails_output)
+        with gr.Tab("Application Monitor"):
+            monitor_button = gr.Button("Get Application Stats")
+            monitor_output = gr.JSON(label="Application Stats")
+            monitor_button.click(get_application_stats_interface, outputs=monitor_output)
 
+    return demo
+
+# Main execution
 if __name__ == "__main__":
-    try:
-        demo.launch()
-    finally:
-        close_db_connections()
+    # Create and launch Gradio interface
+    demo = create_gradio_interface()
+    demo.launch(
+        server_name="0.0.0.0",  # Makes the app accessible on the local network
+        server_port=7860,  # You can change this port if needed
+        share=True  # Creates a public link. Set to False in production.
+    )
