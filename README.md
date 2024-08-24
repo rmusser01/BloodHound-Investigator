@@ -1,4 +1,4 @@
-# BloodHound Investigator
+# BloodHound Investigator (WIP - Not currently working)
 
 ---------------------------------------------------------------------------------
 ## Table of Contents
