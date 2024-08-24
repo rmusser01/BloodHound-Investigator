@@ -8,7 +8,7 @@
 - [Plans](#plans)
 ---------------------------------------------------------------------------------
 https://github.com/rotationalio/tribe
-
+https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage-agent
 
 
 ---------------------------------------------------------------------------------
