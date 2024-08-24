@@ -29,7 +29,7 @@ https://github.com/rotationalio/tribe
 ---------------------------------------------------------------------------------
 ### Why? <a name="why"></a>
 - I had a conversation with Jack Poulson(https://techinquiry.org/), and decided a project like this could be helpful to people.
-- I believe that giving people tools to help them solve their goals scales.
+- I believe that giving people tools to help them solve their goals that scale is one of the biggest helps one can do.
 
 ---------------------------------------------------------------------------------
 
