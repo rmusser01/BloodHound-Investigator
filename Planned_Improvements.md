@@ -1,18 +1,6 @@
 Improvements according to Claude Sonnet
 
 ```
-Code Organization:
-
-Consider splitting the main file (BloodHound-Investigator-Backend.py) into multiple modules for better organization and maintainability.
-Implement a proper MVC (Model-View-Controller) or similar architecture to separate concerns.
-
-
-Security:
-
-Avoid hardcoding database credentials. Use environment variables or a secure configuration management system.
-Implement proper input validation and sanitization, especially for user inputs in the Gradio interface.
-
-
 Performance:
 
 The relationship graph building function processes emails in batches, which is good, but consider implementing more efficient algorithms for large-scale data.
