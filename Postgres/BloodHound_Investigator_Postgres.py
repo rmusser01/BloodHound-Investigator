@@ -1,10 +1,9 @@
 import logging
 from dotenv import load_dotenv
-
+#
 # Import functions from the backend
-from Postgres.App_Function_Libraries.Bloodhound_Investigator_Backend import (analyze_sentiment, perform_topic_modeling, get_emails_by_topic, build_relationship_graph, get_relationship_data, get_most_connected_entities, generate_report, export_data_csv, semantic_search, check_red_flags, check_data_integrity, app_monitor)
 from Postgres.App_Function_Libraries.Gradio_UI import create_gradio_interface
-
+#
 # Load environment variables
 load_dotenv()
 
