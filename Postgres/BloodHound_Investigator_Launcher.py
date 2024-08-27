@@ -6,7 +6,7 @@ import logging
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-# BloodHound-Investigator-Setup.py
+# BloodHound_Investigator_Launcher.py
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

@@ -1,0 +1,8 @@
+gensim
+spacy
+nltk
+textblob
+scikit-learn
+gradio
+psycopg2-binary
+python-dotenv

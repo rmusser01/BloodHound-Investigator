@@ -18,7 +18,8 @@ from Postgres.App_Function_Libraries.Bloodhound_Investigator_Backend import (ana
                                                                              get_most_connected_entities, error_handler,
                                                                              validate_input_decorator, get_email_by_id,
                                                                              analyze_email, analyze_email_thread,
-                                                                             analyze_sentiment_trend)
+                                                                             analyze_sentiment_trend,
+                                                                             store_email_analysis, build_lda_model)
 #
 # Third-Party Imports
 import gradio as gr
@@ -267,6 +268,37 @@ def analyze_sentiment_trend_interface(start_date, end_date):
         raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
     return analyze_sentiment_trend(start, end)
 
+
+@error_handler
+@validate_input_decorator(EmailID)
+def analyze_email_interface(email_id):
+    email = get_email_by_id(email_id)
+    if not email:
+        raise ValueError(f"No email found with id {email_id}")
+    analysis_result = analyze_email(email)
+    store_email_analysis(analysis_result)
+    return analysis_result
+
+@error_handler
+@validate_input_decorator(EmailID)
+def analyze_thread_interface(thread_id):
+    return analyze_email_thread(thread_id)
+
+@error_handler
+def analyze_sentiment_trend_interface(start_date, end_date):
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
+    return analyze_sentiment_trend(start, end)
+
+@error_handler
+@validate_input_decorator(TopicModel)
+def perform_topic_modeling_interface(num_topics):
+    lda_model, _ = build_lda_model(num_topics)
+    topics = lda_model.print_topics()
+    return {i: topic for i, topic in topics}
 
 # Gradio interface
 def create_gradio_interface():

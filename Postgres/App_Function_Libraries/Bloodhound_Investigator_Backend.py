@@ -788,13 +788,14 @@ def analyze_all_emails():
 def store_email_analysis(analysis_result):
     query = """
     INSERT INTO email_analysis 
-    (email_id, sentiment_score, sentiment_label, entities, topics, importance_score)
-    VALUES (%s, %s, %s, %s, %s, %s)
+    (email_id, sentiment_score, sentiment_label, entities, topics, keywords, importance_score)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (email_id) DO UPDATE SET
     sentiment_score = EXCLUDED.sentiment_score,
     sentiment_label = EXCLUDED.sentiment_label,
     entities = EXCLUDED.entities,
     topics = EXCLUDED.topics,
+    keywords = EXCLUDED.keywords,
     importance_score = EXCLUDED.importance_score,
     analysis_date = CURRENT_TIMESTAMP
     """
@@ -802,8 +803,9 @@ def store_email_analysis(analysis_result):
         analysis_result['email_id'],
         analysis_result['sentiment']['score'],
         analysis_result['sentiment']['sentiment'],
-        json.dumps(analysis_result['named_entities']),
+        json.dumps(analysis_result['entities']),
         json.dumps(analysis_result['topics']),
+        json.dumps(analysis_result['keywords']),
         analysis_result['importance_score']
     )
     execute_query(query, params, fetch=False, commit=True)
