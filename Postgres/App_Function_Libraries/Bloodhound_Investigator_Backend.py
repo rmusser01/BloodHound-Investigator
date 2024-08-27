@@ -8,51 +8,59 @@ sentiment analysis, topic modeling, and relationship mapping.
 import cProfile
 ############################################################################################################################################################################
 # Native Imports
-import os
+import atexit
+import csv
+from datetime import datetime
+from datetime import timedelta
+import io
+import json
 import logging
-import pstats
-from contextlib import contextmanager
+from memory_profiler import memory_usage
+import os
+import re
+import requests
+import schedule
+import time
 #
 # Local Imports
 from Postgres.App_Function_Libraries.Gradio_UI import create_gradio_interface
 #
 # Third-Party Imports
+import asyncio
+from contextlib import contextmanager
+from dotenv import load_dotenv
+import functools
+from functools import lru_cache, wraps
+from gensim import corpora
+from gensim.models.ldamodel import LdaModel
+from gensim.parsing.preprocessing import STOPWORDS
+from gensim.utils import simple_preprocess
+import networkx as nx
+import numpy as np
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
+import pstats
+import psutil
 import psycopg2
 from psycopg2 import pool
-from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
-import tika
-import re
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
-import networkx as nx
-import json
+from pybreaker import CircuitBreaker
+from pydantic import ValidationError
 from reportlab.lib import colors
-import spacy
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
-import csv
-import gc
-import io
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objs as go
-import asyncio
-import schedule
-import time
-from datetime import datetime
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-import requests
 import signal
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+import spacy
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from textblob import TextBlob
 import threading
-import atexit
-from memory_profiler import memory_usage
-import psutil
-from pybreaker import CircuitBreaker
-from functools import lru_cache, wraps
+import tika
+from torch.nn.utils.parametrize import cached
+from typing import Callable, Any
 #
 # End of Imports
 ############################################################################################################################################################################
@@ -80,8 +88,18 @@ nlp = spacy.load("en_core_web_sm")
 # Load the pre-trained Sentence Transformer model
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
+# Download the NLTK VADER model
+nltk.download('vader_lexicon')
+
 # Initialize a networkx graph for relationship mapping
 G = nx.Graph()
+
+# Initialize the relationship_graph
+relationship_graph = None
+
+# Initialize ntlk resources
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
 
 # Database configuration
 DB_CONFIG = {
@@ -99,9 +117,55 @@ connection_pool = psycopg2.pool.ThreadedConnectionPool(
     **DB_CONFIG
 )
 
+
+
 #
 # End of Global Variables
 ############################################################################################################################################################################0
+
+
+############################################################################################################################################################################
+#
+# Error Handling
+def error_handler(func: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except ValueError as e:
+            logger.warning(f"ValueError in {func.__name__}: {str(e)}")
+            return f"Input Error: {str(e)}"
+        except DatabaseError as e:
+            logger.error(f"DatabaseError in {func.__name__}: {str(e)}")
+            return f"Database Error: An error occurred while accessing the database. Please try again later."
+        except AnalysisError as e:
+            logger.error(f"AnalysisError in {func.__name__}: {str(e)}")
+            return f"Analysis Error: {str(e)}"
+        except Exception as e:
+            logger.critical(f"Unexpected error in {func.__name__}: {str(e)}")
+            return "An unexpected error occurred. Please contact the system administrator."
+    return wrapper
+
+
+def validate_input_decorator(*models):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                for model, arg in zip(models, args):
+                    model(**arg if isinstance(arg, dict) else {"value": arg})
+                return func(*args, **kwargs)
+            except ValidationError as e:
+                logger.warning(f"Validation error in {func.__name__}: {str(e)}")
+                return f"Input Validation Error: {str(e)}"
+        return wrapper
+    return decorator
+
+#
+# End of Error Handling
+############################################################################################################################################################################
+
+
 
 
 # Graceful Shutdown Handler
@@ -274,9 +338,33 @@ app_monitor = ApplicationMonitor()
 #
 # Sentiment Analysis Functions
 
-# FIXME: Implement async version of sentiment analysis
 def perform_sentiment_analysis(email_content):
-    pass
+    # TextBlob analysis
+    blob_analysis = TextBlob(email_content)
+    blob_polarity = blob_analysis.sentiment.polarity
+    blob_subjectivity = blob_analysis.sentiment.subjectivity
+
+    # VADER analysis
+    sia = SentimentIntensityAnalyzer()
+    vader_scores = sia.polarity_scores(email_content)
+
+    # Combine scores (you can adjust weights if needed)
+    combined_score = (blob_polarity + vader_scores['compound']) / 2
+
+    if combined_score > 0.05:
+        sentiment = "Positive"
+    elif combined_score < -0.05:
+        sentiment = "Negative"
+    else:
+        sentiment = "Neutral"
+
+    return {
+        "sentiment": sentiment,
+        "score": combined_score,
+        "subjectivity": blob_subjectivity,
+        "vader_scores": vader_scores,
+        "blob_polarity": blob_polarity
+    }
 
 @with_retry()
 def analyze_sentiment(email_id):
@@ -332,7 +420,19 @@ def analyze_sentiment(email_id):
         raise EmailAnalyzerError("An unexpected error occurred during sentiment analysis.")
 
 
-# Topic Modeling
+@lru_cache(maxsize=128)
+def get_email_content(email_id):
+    query = "SELECT subject, body FROM emails WHERE id = %s"
+    return execute_query(query, (email_id,))[0]
+#
+# End of Sentiment Analysis Functions
+############################################################################################################################################################################
+
+
+############################################################################################################################################################################
+#
+# Topic Modeling Functions
+
 @profile_memory
 def perform_topic_modeling(n_topics=5):
     """
@@ -390,12 +490,150 @@ def perform_topic_modeling(n_topics=5):
         raise
 
 
-@lru_cache(maxsize=128)
-def get_email_content(email_id):
-    query = "SELECT subject, body FROM emails WHERE id = %s"
-    return execute_query(query, (email_id,))[0]
+def preprocess_text(text):
+    return [token for token in simple_preprocess(text) if token not in STOPWORDS]
+
+@cached(max_size=1)
+def build_lda_model(num_topics=10):
+    # Fetch all email contents
+    query = "SELECT body FROM emails"
+    email_bodies = [row[0] for row in execute_query(query)]
+
+    # Preprocess the texts
+    processed_docs = [preprocess_text(doc) for doc in email_bodies]
+
+    # Create a dictionary representation of the documents
+    dictionary = corpora.Dictionary(processed_docs)
+
+    # Create document-term matrix
+    corpus = [dictionary.doc2bow(doc) for doc in processed_docs]
+
+    # Build LDA model
+    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=100,
+                         update_every=1, chunksize=100, passes=10, alpha='auto', per_word_topics=True)
+
+    return lda_model, dictionary
+
+def get_email_topics(email_id, num_topics=10):
+    lda_model, dictionary = build_lda_model(num_topics)
+
+    # Fetch email content
+    query = "SELECT body FROM emails WHERE id = %s"
+    email_body = execute_query(query, (email_id,))[0][0]
+
+    # Preprocess the email body
+    processed_doc = preprocess_text(email_body)
+
+    # Get topic distribution for the email
+    bow_vector = dictionary.doc2bow(processed_doc)
+    topic_distribution = lda_model[bow_vector]
+
+    return sorted(topic_distribution, key=lambda x: x[1], reverse=True)
+
 #
-# End of Sentiment Analysis Functions
+# End of Topic Modeling Functions
+############################################################################################################################################################################
+
+
+############################################################################################################################################################################
+#
+# Named Entity Recognition Functions
+
+def perform_ner(email_id):
+    query = "SELECT subject, body FROM emails WHERE id = %s"
+    subject, body = execute_query(query, (email_id,))[0]
+
+    doc = nlp(f"{subject} {body}")
+
+    entities = {}
+    for ent in doc.ents:
+        if ent.label_ not in entities:
+            entities[ent.label_] = []
+        entities[ent.label_].append(ent.text)
+
+    return entities
+
+#
+# End of Named Entity Recognition Functions
+############################################################################################################################################################################
+
+
+############################################################################################################################################################################
+#
+# Sentiment Trend Analysis Functions
+
+def analyze_sentiment_trend(start_date, end_date, interval_days=7):
+    query = """
+    SELECT DATE_TRUNC('day', e.sent_date) as date, AVG(ea.sentiment_score) as avg_sentiment
+    FROM emails e
+    JOIN email_analysis ea ON e.id = ea.email_id
+    WHERE e.sent_date BETWEEN %s AND %s
+    GROUP BY DATE_TRUNC('day', e.sent_date)
+    ORDER BY date
+    """
+    sentiment_data = execute_query(query, (start_date, end_date))
+
+    trend_data = []
+    current_date = start_date
+    while current_date <= end_date:
+        interval_end = min(current_date + timedelta(days=interval_days), end_date)
+        interval_sentiment = [score for date, score in sentiment_data if current_date <= date < interval_end]
+
+        if interval_sentiment:
+            avg_sentiment = sum(interval_sentiment) / len(interval_sentiment)
+            trend_data.append({
+                'start_date': current_date,
+                'end_date': interval_end,
+                'avg_sentiment': avg_sentiment
+            })
+
+        current_date = interval_end
+
+    return trend_data
+
+#
+# End of Sentiment Trend Analysis Functions
+############################################################################################################################################################################
+
+############################################################################################################################################################################
+#
+# Email Thread Analysis Functions
+
+def analyze_email_thread(thread_id):
+    query = """
+    SELECT id, sender, recipient, subject, sent_date, in_reply_to
+    FROM emails
+    WHERE thread_id = %s
+    ORDER BY sent_date
+    """
+    thread_emails = execute_query(query, (thread_id,))
+
+    thread_analysis = {
+        'thread_id': thread_id,
+        'email_count': len(thread_emails),
+        'duration': (thread_emails[-1][4] - thread_emails[0][4]).days,
+        'participants': set(),
+        'reply_depth': 0,
+    }
+
+    for email in thread_emails:
+        thread_analysis['participants'].add(email[1])  # sender
+        thread_analysis['participants'].add(email[2])  # recipient
+
+        if email[5]:  # in_reply_to
+            reply_depth = 1
+            reply_to = email[5]
+            while reply_to:
+                reply_depth += 1
+                reply_to = next((e[5] for e in thread_emails if e[0] == reply_to), None)
+            thread_analysis['reply_depth'] = max(thread_analysis['reply_depth'], reply_depth)
+
+    thread_analysis['participants'] = list(thread_analysis['participants'])
+
+    return thread_analysis
+
+#
+# End of Email Thread Analysis Functions
 ############################################################################################################################################################################
 
 
@@ -403,39 +641,67 @@ def get_email_content(email_id):
 #
 # Relationship Mapping Functions
 
+def process_email_for_graph(G, email_id, subject, body):
+    """
+    It uses spaCy for named entity recognition to extract entities from the email text.
+    It adds each entity as a node in the graph if it doesn't exist, or increments its weight if it does.
+    It creates edges between entities that appear in the same email.
+    It adds the email itself as a node and connects it to all entities found in that email.
+    """
+    # Combine subject and body for processing
+    text = f"{subject} {body}"
 
-# New FIXME
-def process_email_for_graph(email_id, subject, body):
-    pass
+    # Process the text with spaCy
+    doc = nlp(text)
+
+    # Extract named entities
+    entities = [(ent.text, ent.label_) for ent in doc.ents]
+
+    # Add nodes and edges to the graph
+    for entity, entity_type in entities:
+        if not G.has_node(entity):
+            G.add_node(entity, type=entity_type, weight=1)
+        else:
+            G.nodes[entity]['weight'] += 1
+
+    # Connect entities that appear in the same email
+    for i in range(len(entities)):
+        for j in range(i + 1, len(entities)):
+            entity1, _ = entities[i]
+            entity2, _ = entities[j]
+            if G.has_edge(entity1, entity2):
+                G[entity1][entity2]['weight'] += 1
+            else:
+                G.add_edge(entity1, entity2, weight=1)
+
+    # Add email as a node and connect it to entities
+    G.add_node(f"Email_{email_id}", type="Email", weight=1)
+    for entity, _ in entities:
+        G.add_edge(f"Email_{email_id}", entity, weight=1)
+
+    logger.info(f"Processed email {email_id} for graph: {len(entities)} entities found")
 
 
 def build_relationship_graph(batch_size=1000):
+    # Initialize a new graph/Reset it
+    G = nx.Graph()
     try:
         total_processed = 0
         while not graceful_shutdown.is_shutting_down():
-            try:
-                batch = execute_query(
-                    "SELECT id, subject, body FROM emails WHERE id > %s ORDER BY id LIMIT %s",
-                    (total_processed, batch_size)
-                )
-            except psycopg2.Error as e:
-                logger.error(f"Database error when fetching email batch: {str(e)}")
-                raise DatabaseError("Failed to fetch email batch from the database.")
-
+            batch = execute_query(
+                "SELECT id, subject, body FROM emails WHERE id > %s ORDER BY id LIMIT %s",
+                (total_processed, batch_size)
+            )
             if not batch:
                 break
 
             for email_id, subject, body in batch:
-                try:
-                    process_email_for_graph(email_id, subject, body)
-                except Exception as e:
-                    logger.error(f"Error processing email {email_id} for graph: {str(e)}")
-                    # Continue processing other emails
+                process_email_for_graph(G, email_id, subject, body)
 
             total_processed += len(batch)
             logger.info(f"Processed {total_processed} emails")
 
-        return len(G.nodes), len(G.edges)
+        return G, len(G.nodes), len(G.edges)
     except DatabaseError:
         raise
     except Exception as e:
@@ -444,13 +710,12 @@ def build_relationship_graph(batch_size=1000):
 
 
 
-def get_relationship_data():
+def get_relationship_data(G):
     return json.dumps(nx.node_link_data(G))
 
 
-def get_most_connected_entities(top_n=10):
+def get_most_connected_entities(G, top_n=10):
     return sorted(G.degree, key=lambda x: x[1], reverse=True)[:top_n]
-
 
 #
 # End of Relationship Mapping Functions
@@ -461,21 +726,115 @@ def get_most_connected_entities(top_n=10):
 #
 # Analyze Emails Functions
 
+
+# Update the analyze_email function to include NER results
 def analyze_email(email):
-    pass
+    email_id, subject, body, sender, recipient, date = email
+
+    # Combine subject and body for analysis
+    full_text = f"{subject} {body}"
+
+    # Sentiment analysis
+    sentiment_result = perform_sentiment_analysis(full_text)
+
+    # Named Entity Recognition
+    doc = nlp(full_text)
+    entities = [(ent.text, ent.label_) for ent in doc.ents]
+
+    # Advanced Topic Modeling using LDA
+    topics = get_email_topics(email_id)
+
+    # Email metadata
+    metadata = {
+        'sender': sender,
+        'recipient': recipient,
+        'date': date,
+        'subject': subject
+    }
+
+    # Keyword extraction (simple version using most common words)
+    words = [word.lower() for word in full_text.split() if word.isalnum()]
+    word_freq = nltk.FreqDist(words)
+    keywords = [word for word, _ in word_freq.most_common(5)]
+
+    # Perform NER (using the existing perform_ner function)
+    ner_results = perform_ner(email_id)
+
+    # Calculate email importance score
+    importance_score = calculate_email_importance(email_id)
+
+    # Compile results
+    analysis_result = {
+        'email_id': email_id,
+        'sentiment': sentiment_result,
+        'entities': entities,
+        'topics': topics[:5],  # Limit to top 5 topics
+        'metadata': metadata,
+        'keywords': keywords,
+        'named_entities': ner_results,
+        'importance_score': importance_score
+    }
+
+    return analysis_result
 
 
 def analyze_all_emails():
     for email in process_emails_generator():
-        analyze_email(email)
+        result = analyze_email(email)
+        store_email_analysis(result)
+        logger.info(f"Analyzed and stored results for email {result['email_id']}")
+
+
+def store_email_analysis(analysis_result):
+    query = """
+    INSERT INTO email_analysis 
+    (email_id, sentiment_score, sentiment_label, entities, topics, importance_score)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (email_id) DO UPDATE SET
+    sentiment_score = EXCLUDED.sentiment_score,
+    sentiment_label = EXCLUDED.sentiment_label,
+    entities = EXCLUDED.entities,
+    topics = EXCLUDED.topics,
+    importance_score = EXCLUDED.importance_score,
+    analysis_date = CURRENT_TIMESTAMP
+    """
+    params = (
+        analysis_result['email_id'],
+        analysis_result['sentiment']['score'],
+        analysis_result['sentiment']['sentiment'],
+        json.dumps(analysis_result['named_entities']),
+        json.dumps(analysis_result['topics']),
+        analysis_result['importance_score']
+    )
+    execute_query(query, params, fetch=False, commit=True)
 
 
 def analyze_email_task(email_id):
-    # Perform various analysis tasks
-    analyze_sentiment(email_id)
-    extract_entities(email_id)
-    # ... other analysis functions
-    # FIXME
+    # Fetch the email
+    email = get_email_by_id(email_id)
+    if not email:
+        raise ValueError(f"No email found with id {email_id}")
+
+    # Perform analysis
+    analysis_result = analyze_email(email)
+
+    # Store the results
+    store_email_analysis(analysis_result)
+
+    # Update the relationship graph
+    global relationship_graph
+    if relationship_graph is None:
+        relationship_graph = nx.Graph()
+    process_email_for_graph(relationship_graph, email_id, email[1],
+                            email[2])  # Assuming email[1] is subject and email[2] is body
+
+    logger.info(f"Completed analysis for email {email_id}")
+
+
+def get_email_by_id(email_id):
+    query = "SELECT id, subject, body, sender, recipient, sent_date FROM emails WHERE id = %s"
+    result = execute_query(query, (email_id,))
+    return result[0] if result else None
 
 
 def get_emails_by_topic(topic_id, page=1, per_page=20):
@@ -528,6 +887,32 @@ def build_email_threads():
             threads[email_id] = []
 
     return threads
+
+
+def calculate_email_importance(email_id):
+    query = """
+    SELECT e.sender, e.recipient, e.subject, e.body, ea.sentiment_score, 
+           array_length(e.entity_tags, 1) as entity_count
+    FROM emails e
+    JOIN email_analysis ea ON e.id = ea.email_id
+    WHERE e.id = %s
+    """
+    email_data = execute_query(query, (email_id,))[0]
+
+    sender, recipient, subject, body, sentiment_score, entity_count = email_data
+
+    # Define importance factors (you can adjust these weights)
+    importance_factors = {
+        'length': len(body) / 1000,  # Normalize by 1000 characters
+        'sentiment_intensity': abs(sentiment_score),
+        'entity_count': entity_count / 10,  # Normalize by 10 entities
+        'recipient_count': len(recipient.split(','))
+    }
+
+    # Calculate importance score
+    importance_score = sum(importance_factors.values()) / len(importance_factors)
+
+    return importance_score
 
 #
 # End of Email Processing Functions
@@ -696,9 +1081,17 @@ def get_relationship_data():
 def get_most_connected_entities(top_n=10):
     return sorted(G.degree, key=lambda x: x[1], reverse=True)[:top_n]
 
-# FIXME: This function is not yet implemented
+
 def get_sentiment_statistics():
-    pass
+    query = """
+    SELECT 
+        sentiment_label AS sentiment,
+        COUNT(*) as count
+    FROM email_analysis
+    GROUP BY sentiment_label
+    """
+    results = execute_query(query)
+    return dict(results)
 
 
 def generate_report(output_file):

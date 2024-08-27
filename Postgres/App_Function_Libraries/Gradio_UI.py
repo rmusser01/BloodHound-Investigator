@@ -1,6 +1,8 @@
 # Gradio interface
 #
 #1st-Party Imports
+from datetime import datetime
+
 import plotly.graph_objs as go
 import networkx as nx
 import json
@@ -13,7 +15,10 @@ from Postgres.App_Function_Libraries.Bloodhound_Investigator_Backend import (ana
                                                                              check_red_flags, check_data_integrity,
                                                                              app_monitor, logger, get_emails_by_topic,
                                                                              get_relationship_data,
-                                                                             get_most_connected_entities)
+                                                                             get_most_connected_entities, error_handler,
+                                                                             validate_input_decorator, get_email_by_id,
+                                                                             analyze_email, analyze_email_thread,
+                                                                             analyze_sentiment_trend)
 #
 # Third-Party Imports
 import gradio as gr
@@ -43,6 +48,8 @@ def validate_input(input_data, model):
         raise ValueError(str(e))
 
 
+@error_handler
+@validate_input_decorator(EmailID)
 def analyze_sentiment_interface(email_id):
     try:
         validate_input({"email_id": email_id}, EmailID)
@@ -55,6 +62,8 @@ def analyze_sentiment_interface(email_id):
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
+@validate_input_decorator(EmailID)
 def perform_topic_modeling_interface(n_topics):
     try:
         validate_input({"n_topics": n_topics}, TopicModel)
@@ -67,6 +76,8 @@ def perform_topic_modeling_interface(n_topics):
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
+@validate_input_decorator(EmailID)
 def get_emails_by_topic_interface(topic_id):
     try:
         validate_input({"email_id": topic_id}, EmailID)  # Reusing EmailID for topic_id validation
@@ -79,18 +90,27 @@ def get_emails_by_topic_interface(topic_id):
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def build_relationship_graph_interface():
     try:
-        nodes, edges = build_relationship_graph()
+        G, nodes, edges = build_relationship_graph()
+        # Store G in a global variable or in a session state
+        global relationship_graph
+        relationship_graph = G
         return f"Built relationship graph with {nodes} nodes and {edges} edges"
     except Exception as e:
         logger.error(f"Error in build_relationship_graph_interface: {e}")
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def visualize_relationships_interface():
     try:
-        graph_data = json.loads(get_relationship_data())
+        global relationship_graph
+        if relationship_graph is None:
+            return "Please build the relationship graph first."
+
+        graph_data = json.loads(get_relationship_data(relationship_graph))
         G = nx.node_link_graph(graph_data)
 
         pos = nx.spring_layout(G)
@@ -139,15 +159,21 @@ def visualize_relationships_interface():
         return None
 
 
+@error_handler
 def get_most_connected_entities_interface():
     try:
-        entities = get_most_connected_entities()
+        global relationship_graph
+        if relationship_graph is None:
+            return "Please build the relationship graph first."
+
+        entities = get_most_connected_entities(relationship_graph)
         return "\n".join([f"{entity}: {connections} connections" for entity, connections in entities])
     except Exception as e:
         logger.error(f"Error in get_most_connected_entities_interface: {e}")
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def generate_report_interface(output_file):
     try:
         generate_report(output_file)
@@ -157,6 +183,7 @@ def generate_report_interface(output_file):
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def export_data_csv_interface():
     try:
         csv_data = export_data_csv()
@@ -166,6 +193,7 @@ def export_data_csv_interface():
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def perform_semantic_search_interface(query):
     try:
         validate_input({"query": query}, SearchQuery)
@@ -178,6 +206,7 @@ def perform_semantic_search_interface(query):
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def check_red_flags_interface(email_id):
     try:
         validate_input({"email_id": email_id}, EmailID)
@@ -193,6 +222,7 @@ def check_red_flags_interface(email_id):
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def check_data_integrity_interface():
     try:
         issues = check_data_integrity()
@@ -205,6 +235,7 @@ def check_data_integrity_interface():
         return f"An error occurred: {str(e)}"
 
 
+@error_handler
 def get_application_stats_interface():
     try:
         stats = app_monitor.get_stats()
@@ -212,6 +243,29 @@ def get_application_stats_interface():
     except Exception as e:
         logger.error(f"Error in get_application_stats_interface: {e}")
         return f"An error occurred: {str(e)}"
+
+
+@error_handler
+@validate_input_decorator(EmailID)
+def analyze_email_interface(email_id):
+    email = get_email_by_id(email_id)
+    if not email:
+        raise ValueError(f"No email found with id {email_id}")
+    return analyze_email(email)
+
+@error_handler
+@validate_input_decorator(EmailID)
+def analyze_thread_interface(thread_id):
+    return analyze_email_thread(thread_id)
+
+@error_handler
+def analyze_sentiment_trend_interface(start_date, end_date):
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
+    return analyze_sentiment_trend(start, end)
 
 
 # Gradio interface
@@ -283,5 +337,24 @@ def create_gradio_interface():
             monitor_button = gr.Button("Get Application Stats")
             monitor_output = gr.JSON(label="Application Stats")
             monitor_button.click(get_application_stats_interface, outputs=monitor_output)
+
+        with gr.Tab("Advanced Analysis"):
+            email_id_input = gr.Number(label="Email ID")
+            analyze_button = gr.Button("Analyze Email")
+            analysis_output = gr.JSON(label="Analysis Result")
+
+            thread_id_input = gr.Number(label="Thread ID")
+            thread_analyze_button = gr.Button("Analyze Thread")
+            thread_analysis_output = gr.JSON(label="Thread Analysis Result")
+
+            start_date_input = gr.Textbox(label="Start Date (YYYY-MM-DD)")
+            end_date_input = gr.Textbox(label="End Date (YYYY-MM-DD)")
+            sentiment_trend_button = gr.Button("Analyze Sentiment Trend")
+            sentiment_trend_output = gr.JSON(label="Sentiment Trend Result")
+
+            analyze_button.click(analyze_email_interface, inputs=email_id_input, outputs=analysis_output)
+            thread_analyze_button.click(analyze_thread_interface, inputs=thread_id_input, outputs=thread_analysis_output)
+            sentiment_trend_button.click(analyze_sentiment_trend_interface, inputs=[start_date_input, end_date_input],
+                                         outputs=sentiment_trend_output)
 
     return demo

@@ -57,6 +57,7 @@ def setup_database():
         conn = psycopg2.connect(dbname="email_analyzer", user="postgres", password="postgres", host="localhost")
         cur = conn.cursor()
 
+        # Create emails table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS emails (
             id SERIAL PRIMARY KEY,
@@ -79,6 +80,19 @@ def setup_database():
         )
         """)
 
+        # Create email_analysis table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS email_analysis (
+            email_id INTEGER PRIMARY KEY REFERENCES emails(id),
+            sentiment_score FLOAT,
+            sentiment_label VARCHAR(10),
+            entities JSONB,
+            topics JSONB,
+            keywords JSONB,
+            analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
         # Create indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_sent_date ON emails (sent_date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails (sender)")
@@ -90,6 +104,10 @@ def setup_database():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_red_flags ON emails USING GIN (red_flags)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_entity_tags ON emails USING GIN (entity_tags)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_text_search ON emails USING GIN (to_tsvector('english', subject || ' ' || body))")
+
+        # Create index for email_analysis
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_email_analysis_sentiment_score ON email_analysis (sentiment_score)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_email_analysis_sentiment_label ON email_analysis (sentiment_label)")
 
         # Enable vector extension
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -111,6 +129,7 @@ def setup_database():
     except psycopg2.Error as e:
         logger.error(f"An error occurred while setting up the database: {e}")
         sys.exit(1)
+
 
 def install_requirements():
     logger.info("Installing required packages...")
