@@ -1,12 +1,16 @@
 import os
 import subprocess
 import sys
+import time
 import venv
 import logging
-import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from datetime import datetime
 
-# BloodHound_Investigator_Launcher.py
+import psycopg2
+import threading
+import schedule
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from dotenv import load_dotenv
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,10 +61,10 @@ def setup_database():
         conn = psycopg2.connect(dbname="email_analyzer", user="postgres", password="postgres", host="localhost")
         cur = conn.cursor()
 
-        # Create emails table
+        # Create emails table with partitioning
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS emails (
-            id SERIAL PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS emails_partitioned (
+            id SERIAL,
             sender VARCHAR(255),
             recipient VARCHAR(255),
             subject TEXT,
@@ -77,8 +81,26 @@ def setup_database():
             source_classification TEXT,
             red_flags TEXT[],
             entity_tags TEXT[]
-        )
+        ) PARTITION BY RANGE (sent_date)
         """)
+
+        # Create partitions
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS emails_y2021 PARTITION OF emails_partitioned
+            FOR VALUES FROM ('2021-01-01') TO ('2022-01-01')
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS emails_y2022 PARTITION OF emails_partitioned
+            FOR VALUES FROM ('2022-01-01') TO ('2023-01-01')
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS emails_y2023 PARTITION OF emails_partitioned
+            FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')
+        """)
+
+        # Rename tables if necessary
+        cur.execute("ALTER TABLE IF EXISTS emails RENAME TO emails_old")
+        cur.execute("ALTER TABLE emails_partitioned RENAME TO emails")
 
         # Create email_analysis table
         cur.execute("""
@@ -89,6 +111,7 @@ def setup_database():
             entities JSONB,
             topics JSONB,
             keywords JSONB,
+            importance_score FLOAT,
             analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
@@ -104,10 +127,10 @@ def setup_database():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_red_flags ON emails USING GIN (red_flags)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_entity_tags ON emails USING GIN (entity_tags)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_text_search ON emails USING GIN (to_tsvector('english', subject || ' ' || body))")
-
-        # Create index for email_analysis
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_email_analysis_email_id ON email_analysis (email_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_email_analysis_sentiment_score ON email_analysis (sentiment_score)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_email_analysis_sentiment_label ON email_analysis (sentiment_label)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_subject_body ON emails USING gin (to_tsvector('english', subject || ' ' || body))")
 
         # Enable vector extension
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -130,7 +153,6 @@ def setup_database():
         logger.error(f"An error occurred while setting up the database: {e}")
         sys.exit(1)
 
-
 def install_requirements():
     logger.info("Installing required packages...")
     requirements = [
@@ -146,9 +168,10 @@ def install_requirements():
         "plotly",
         "pandas",
         "python-dotenv",
-        "pydantic"
+        "pydantic",
+        "cachetools"
     ]
-    
+
     for req in requirements:
         logger.info(f"Installing {req}...")
         run_in_virtual_env(f"pip install {req}")
@@ -176,6 +199,79 @@ def setup_tika():
     logger.info("Apache Tika downloaded successfully.")
     logger.info("To start Tika server, run: java -jar tika-server.jar")
 
+def schedule_integrity_check():
+    # Schedule the integrity check to run daily at 2:00 AM
+    schedule.every().day.at("02:00").do(run_integrity_check)
+    logger.info("Scheduled daily integrity check for 2:00 AM")
+
+    # You can add more scheduled tasks here if needed
+
+    # Run the scheduler in the background
+    def run_scheduler():
+        while True:
+            schedule.run_pending()
+            time.sleep(60)  # Wait for 60 seconds before checking again
+
+    # Start the scheduler in a separate thread
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+
+def create_gradio_interface():
+    # This function should be implemented in your Gradio UI code
+    from Postgres.App_Function_Libraries.Gradio_UI import create_gradio_interface
+    return create_gradio_interface()
+
+def run_integrity_check():
+    logger.info("Running scheduled data integrity check")
+    try:
+        # Connect to the database
+        conn = psycopg2.connect(dbname="email_analyzer", user="postgres", password="postgres", host="localhost")
+        cur = conn.cursor()
+
+        # Check for emails without sentiment analysis
+        cur.execute("SELECT COUNT(*) FROM emails WHERE sentiment_analysis IS NULL")
+        missing_sentiment = cur.fetchone()[0]
+
+        # Check for emails without embeddings
+        cur.execute("SELECT COUNT(*) FROM emails WHERE embedding IS NULL")
+        missing_embedding = cur.fetchone()[0]
+
+        # Check for emails with future dates
+        cur.execute("SELECT COUNT(*) FROM emails WHERE sent_date > %s", (datetime.now(),))
+        future_dates = cur.fetchone()[0]
+
+        # Check for duplicate emails
+        cur.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT sender, recipient, subject, sent_date, COUNT(*)
+                FROM emails
+                GROUP BY sender, recipient, subject, sent_date
+                HAVING COUNT(*) > 1
+            ) AS duplicates
+        """)
+        duplicates = cur.fetchone()[0]
+
+        # Log the results
+        if missing_sentiment > 0:
+            logger.warning(f"Found {missing_sentiment} emails without sentiment analysis")
+        if missing_embedding > 0:
+            logger.warning(f"Found {missing_embedding} emails without embeddings")
+        if future_dates > 0:
+            logger.warning(f"Found {future_dates} emails with future dates")
+        if duplicates > 0:
+            logger.warning(f"Found {duplicates} potential duplicate emails")
+
+        if missing_sentiment == 0 and missing_embedding == 0 and future_dates == 0 and duplicates == 0:
+            logger.info("No data integrity issues found")
+
+        # Close database connection
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"Error during integrity check: {str(e)}")
+
+
 def main():
     logger.info("Starting setup for Email Analyzer application...")
 
@@ -194,10 +290,31 @@ def main():
     setup_tika()
 
     logger.info("Setup complete!")
-    logger.info("To run the Email Analyzer application:")
-    logger.info("1. Activate the virtual environment: source venv/bin/activate")
-    logger.info("2. Start the Tika server: java -jar tika-server.jar")
-    logger.info("3. Run the application: python run_email_analyzer.py")
+
+    # Load environment variables
+    load_dotenv()
+
+    # Schedule & Run integrity checks
+    run_integrity_check()
+    #This function performs the actual integrity checks. It:
+    #Checks for emails without sentiment analysis
+    #Checks for emails without embeddings
+    #Checks for emails with future dates
+    #Checks for potential duplicate emails
+    #Logs warnings for any issues found
+    #schedule_integrity_check()
+
+    # Start scheduler in a separate thread
+    scheduler_thread = threading.Thread(target=lambda: schedule.run_pending(), daemon=True)
+    scheduler_thread.start()
+
+    # Create and launch Gradio interface
+    demo = create_gradio_interface()
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False
+    )
 
 if __name__ == "__main__":
     main()

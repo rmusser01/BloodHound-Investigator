@@ -1,8 +1,10 @@
+cachetools
 gensim
-spacy
-nltk
-textblob
-scikit-learn
 gradio
+networkx
+nltk
 psycopg2-binary
 python-dotenv
+scikit-learn
+spacy
+textblob

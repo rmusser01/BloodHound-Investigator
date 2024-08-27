@@ -9,6 +9,7 @@ import cProfile
 ############################################################################################################################################################################
 # Native Imports
 import atexit
+from cachetools import TTLCache
 import csv
 from datetime import datetime
 from datetime import timedelta
@@ -30,7 +31,7 @@ import asyncio
 from contextlib import contextmanager
 from dotenv import load_dotenv
 import functools
-from functools import lru_cache, wraps
+from functools import wraps
 from gensim import corpora
 from gensim.models.ldamodel import LdaModel
 from gensim.parsing.preprocessing import STOPWORDS
@@ -43,6 +44,7 @@ import pstats
 import psutil
 import psycopg2
 from psycopg2 import pool
+from psycopg2.extras import execute_values
 from pybreaker import CircuitBreaker
 from pydantic import ValidationError
 from reportlab.lib import colors
@@ -54,6 +56,9 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.model_selection import train_test_split
 import spacy
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from textblob import TextBlob
@@ -61,6 +66,18 @@ import threading
 import tika
 from torch.nn.utils.parametrize import cached
 from typing import Callable, Any
+import mailbox
+import imaplib
+import email
+from email import policy
+from email.parser import BytesParser
+import os
+import csv
+#import pypff
+from tqdm import tqdm
+import logging
+from email.utils import parsedate_to_datetime
+
 #
 # End of Imports
 ############################################################################################################################################################################
@@ -209,7 +226,7 @@ graceful_shutdown = GracefulShutdown()
 def get_db_connection(timeout=5):
     connection = None
     try:
-        connection = connection_pool.getconn(key=None, timeout=timeout)
+        connection = connection_pool.getconn(key=None)
         yield connection
     except psycopg2.pool.PoolError:
         logger.error("Unable to get a connection from the pool within the specified timeout.")
@@ -231,19 +248,23 @@ def get_db_cursor(commit=False):
 
 
 @contextmanager
-def db_transaction():
+def db_transaction(timeout=5):
     connection = None
     try:
-        connection = get_db_connection(timeout=5)
-        yield connection
-        connection.commit()
+        with get_db_connection(timeout) as connection:
+            try:
+                yield connection
+                connection.commit()
+            except Exception as e:
+                connection.rollback()
+                raise DatabaseError(f"Database transaction failed: {str(e)}")
+            finally:
+                # We don't close the connection here because get_db_connection will handle that
+                pass
     except Exception as e:
-        if connection:
-            connection.rollback()
-        raise DatabaseError(f"Database transaction failed: {str(e)}")
-    finally:
-        if connection:
-            connection.close()
+        # This will catch any exceptions from get_db_connection
+        raise DatabaseError(f"Failed to get database connection: {str(e)}")
+
 
 def execute_query(query, params=None, fetch=True, commit=False):
     with get_db_cursor(commit=commit) as cursor:
@@ -299,6 +320,16 @@ def profile_memory(func):
         print(f"Peak memory usage: {max(mem_usage)} MiB")
         return retval
     return wrapper
+
+
+# Create a cache with a maximum of 100 items and a 1-hour TTL
+email_cache = TTLCache(maxsize=100, ttl=3600)
+
+@cached(cache=email_cache)
+def get_email_content(email_id):
+    query = "SELECT subject, body FROM emails WHERE id = %s"
+    return execute_query(query, (email_id,))[0]
+
 
 # Simple monitoring class
 class ApplicationMonitor:
@@ -419,11 +450,6 @@ def analyze_sentiment(email_id):
         logger.critical(f"Unexpected error in analyze_sentiment: {str(e)}")
         raise EmailAnalyzerError("An unexpected error occurred during sentiment analysis.")
 
-
-@lru_cache(maxsize=128)
-def get_email_content(email_id):
-    query = "SELECT subject, body FROM emails WHERE id = %s"
-    return execute_query(query, (email_id,))[0]
 #
 # End of Sentiment Analysis Functions
 ############################################################################################################################################################################
@@ -708,7 +734,48 @@ def build_relationship_graph(batch_size=1000):
         logger.critical(f"Unexpected error in build_relationship_graph: {str(e)}")
         raise EmailAnalyzerError("An unexpected error occurred while building the relationship graph.")
 
-
+# Old one
+# def build_relationship_graph(batch_size=1000):
+#     app_monitor.log_request()
+#     try:
+#         total_processed = 0
+#         while not graceful_shutdown.is_shutting_down():
+#             query = """
+#                 SELECT id, subject, body
+#                 FROM emails
+#                 WHERE id > %s
+#                 ORDER BY id
+#                 LIMIT %s
+#             """
+#             batch = execute_query(query, (total_processed, batch_size))
+#             if not batch:
+#                 break
+#
+#             for email_id, subject, body in batch:
+#                 text = subject + " " + body
+#                 entities = extract_entities(text)
+#
+#                 for entity in entities:
+#                     if not G.has_node(entity):
+#                         G.add_node(entity, weight=1)
+#                     else:
+#                         G.nodes[entity]['weight'] += 1
+#
+#                 for i in range(len(entities)):
+#                     for j in range(i+1, len(entities)):
+#                         if G.has_edge(entities[i], entities[j]):
+#                             G[entities[i]][entities[j]]['weight'] += 1
+#                         else:
+#                             G.add_edge(entities[i], entities[j], weight=1)
+#
+#             total_processed += len(batch)
+#             logger.info(f"Processed {total_processed} emails")
+#
+#         return len(G.nodes), len(G.edges)
+#     except Exception as e:
+#         app_monitor.log_error()
+#         logger.error(f"Error in build_relationship_graph: {e}")
+#         raise
 
 def get_relationship_data(G):
     return json.dumps(nx.node_link_data(G))
@@ -726,6 +793,27 @@ def get_most_connected_entities(G, top_n=10):
 #
 # Analyze Emails Functions
 
+def train_email_classifier():
+    query = "SELECT body, category FROM emails WHERE category IS NOT NULL"
+    emails = execute_query(query)
+
+    bodies, categories = zip(*emails)
+
+    X_train, X_test, y_train, y_test = train_test_split(bodies, categories, test_size=0.2, random_state=42)
+
+    vectorizer = TfidfVectorizer()
+    X_train_vectorized = vectorizer.fit_transform(X_train)
+
+    classifier = MultinomialNB()
+    classifier.fit(X_train_vectorized, y_train)
+
+    return vectorizer, classifier
+
+
+def classify_email(email_body):
+    vectorizer, classifier = train_email_classifier()
+    vectorized_body = vectorizer.transform([email_body])
+    return classifier.predict(vectorized_body)[0]
 
 # Update the analyze_email function to include NER results
 def analyze_email(email):
@@ -923,6 +1011,67 @@ def calculate_email_importance(email_id):
 
 ############################################################################################################################################################################
 #
+# Batch Processing
+
+def batch_analyze_emails(batch_size=100):
+    total_processed = 0
+    while True:
+        query = """
+        SELECT id, subject, body, sender, recipient, sent_date
+        FROM emails
+        WHERE id > %s
+        ORDER BY id
+        LIMIT %s
+        """
+        batch = execute_query(query, (total_processed, batch_size))
+        if not batch:
+            break
+
+        analysis_results = []
+        for email in batch:
+            result = analyze_email(email)
+            analysis_results.append(result)
+
+        # Bulk insert analysis results
+        store_email_analysis_batch(analysis_results)
+
+        total_processed += len(batch)
+        logger.info(f"Analyzed batch of {len(batch)} emails. Total processed: {total_processed}")
+
+
+def store_email_analysis_batch(analysis_results):
+    query = """
+    INSERT INTO email_analysis 
+    (email_id, sentiment_score, sentiment_label, entities, topics, keywords, importance_score)
+    VALUES %s
+    ON CONFLICT (email_id) DO UPDATE SET
+    sentiment_score = EXCLUDED.sentiment_score,
+    sentiment_label = EXCLUDED.sentiment_label,
+    entities = EXCLUDED.entities,
+    topics = EXCLUDED.topics,
+    keywords = EXCLUDED.keywords,
+    importance_score = EXCLUDED.importance_score,
+    analysis_date = CURRENT_TIMESTAMP
+    """
+    values = [(
+        result['email_id'],
+        result['sentiment']['score'],
+        result['sentiment']['sentiment'],
+        json.dumps(result['entities']),
+        json.dumps(result['topics']),
+        json.dumps(result['keywords']),
+        result['importance_score']
+    ) for result in analysis_results]
+
+    # This requires the psycopg2.extras module
+    execute_values(query, values, argslist=None, template=None, page_size=100, fetch=False)
+
+#
+# End of Batch Processing
+############################################################################################################################################################################
+
+############################################################################################################################################################################
+#
 # Data import functions
 
 import email
@@ -933,10 +1082,10 @@ from email.policy import default
 
 
 def import_from_mbox(mbox_file):
-    with open(mbox_file, 'rb') as f:
-        messages = BytesParser(policy=default).parse(f)
+    mbox = mailbox.mbox(mbox_file)
+    total_messages = len(mbox)
 
-    for message in messages:
+    for message in tqdm(mbox, total=total_messages, desc="Importing from mbox"):
         store_email(message)
 
 
@@ -946,10 +1095,12 @@ def import_from_imap(imap_server, username, password, mailbox='INBOX'):
     mail.select(mailbox)
 
     _, message_numbers = mail.search(None, 'ALL')
-    for num in message_numbers[0].split():
+    total_messages = len(message_numbers[0].split())
+
+    for num in tqdm(message_numbers[0].split(), total=total_messages, desc="Importing from IMAP"):
         _, msg = mail.fetch(num, '(RFC822)')
         email_body = msg[0][1]
-        message = email.message_from_bytes(email_body)
+        message = email.message_from_bytes(email_body, policy=policy.default)
         store_email(message)
 
     mail.close()
@@ -957,27 +1108,107 @@ def import_from_imap(imap_server, username, password, mailbox='INBOX'):
 
 
 def import_from_directory(directory):
-    for filename in os.listdir(directory):
-        if filename.endswith('.eml'):
-            with open(os.path.join(directory, filename), 'rb') as f:
-                message = BytesParser(policy=default).parse(f)
-            store_email(message)
+    eml_files = [f for f in os.listdir(directory) if f.endswith('.eml')]
+    total_files = len(eml_files)
+
+    for filename in tqdm(eml_files, total=total_files, desc="Importing from directory"):
+        with open(os.path.join(directory, filename), 'rb') as f:
+            message = BytesParser(policy=policy.default).parse(f)
+        store_email(message)
 
 
-def store_email(message):
-    # Extract relevant information from the email message
-    sender = message['From']
-    recipient = message['To']
-    subject = message['Subject']
-    date = message['Date']
-    body = get_email_body(message)
+def import_from_csv(csv_file):
+    with open(csv_file, 'r') as f:
+        reader = csv.DictReader(f)
+        total_rows = sum(1 for row in reader)  # Count total rows
+        f.seek(0)  # Reset file pointer
+        next(reader)  # Skip header row
 
-    # Store in the database
+        for row in tqdm(reader, total=total_rows - 1, desc="Importing from CSV"):
+            store_email(row)
+
+
+# FIXME - pypff
+# def import_from_pst(pst_file):
+#     pst = pypff.file()
+#     pst.open(pst_file)
+#     root = pst.get_root_folder()
+#
+#     def process_folder(folder):
+#         for message in tqdm(folder.sub_messages, desc=f"Importing from {folder.name}"):
+#             email_data = {
+#                 'sender': message.get_sender_name(),
+#                 'recipient': message.get_recipient_name(),
+#                 'subject': message.get_subject(),
+#                 'body': message.get_plain_text_body(),
+#                 'sent_date': message.get_delivery_time()
+#             }
+#             store_email(email_data)
+#
+#         for subfolder in folder.sub_folders:
+#             process_folder(subfolder)
+#
+#     process_folder(root)
+#     pst.close()
+#
+# def import_from_ost(ost_file):
+#     # OST files are very similar to PST files, so we can use the same function
+#     import_from_pst(ost_file)
+
+
+def store_email_from_dict(email_data):
+    # Implement this function to store email data in your database
     query = """
     INSERT INTO emails (sender, recipient, subject, body, sent_date)
     VALUES (%s, %s, %s, %s, %s)
     """
-    execute_query(query, (sender, recipient, subject, body, date), fetch=False, commit=True)
+    execute_query(query, (
+        email_data['sender'],
+        email_data['recipient'],
+        email_data['subject'],
+        email_data['body'],
+        email_data['sent_date']
+    ), fetch=False, commit=True)
+
+
+def store_email(message):
+    try:
+        if isinstance(message, dict):
+            email_data = message
+        else:
+            # Extract relevant information from the email message object
+            email_data = {
+                'sender': message['From'],
+                'recipient': message['To'],
+                'subject': message['Subject'],
+                'body': get_email_body(message),
+                'sent_date': message['Date']
+            }
+
+        # Convert the date string to a datetime object
+        if isinstance(email_data['sent_date'], str):
+            email_data['sent_date'] = parsedate_to_datetime(email_data['sent_date'])
+
+        # Store in the database
+        query = """
+        INSERT INTO emails (sender, recipient, subject, body, sent_date)
+        VALUES (%s, %s, %s, %s, %s)
+        """
+        execute_query(query, (
+            email_data['sender'],
+            email_data['recipient'],
+            email_data['subject'],
+            email_data['body'],
+            email_data['sent_date']
+        ), fetch=False, commit=True)
+
+        logger.info(f"Stored email: {email_data['subject']}")
+    except KeyError as e:
+        logger.error(f"Missing key in email data: {str(e)}")
+    except ValueError as e:
+        logger.error(f"Invalid data in email: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error storing email: {str(e)}")
 
 
 def get_email_body(message):
@@ -1023,7 +1254,35 @@ async def process_single_email(email):
 ############################################################################################################################################################################
 
 
+############################################################################################################################################################################
+#
+# Social Network Analysis
 
+def build_email_network():
+    G = nx.Graph()
+    query = "SELECT DISTINCT sender, recipient FROM emails"
+    email_connections = execute_query(query)
+
+    for sender, recipient in email_connections:
+        G.add_edge(sender, recipient)
+
+    return G
+
+
+def get_most_connected_users(top_n=10):
+    G = build_email_network()
+    return sorted(G.degree, key=lambda x: x[1], reverse=True)[:top_n]
+
+
+def get_network_communities():
+    G = build_email_network()
+
+#
+# End of Social Network Analysis
+############################################################################################################################################################################
+
+
+############################################################################################################################################################################
 # Relationship Mapping
 
 def extract_entities(text):
@@ -1033,55 +1292,6 @@ def extract_entities(text):
         if ent.label_ in ['PERSON', 'ORG', 'GPE', 'PRODUCT']:
             entities.append((ent.text, ent.label_))
     return entities
-
-
-def build_relationship_graph(batch_size=1000):
-    app_monitor.log_request()
-    try:
-        total_processed = 0
-        while not graceful_shutdown.is_shutting_down():
-            query = """
-                SELECT id, subject, body 
-                FROM emails 
-                WHERE id > %s 
-                ORDER BY id 
-                LIMIT %s
-            """
-            batch = execute_query(query, (total_processed, batch_size))
-            if not batch:
-                break
-
-            for email_id, subject, body in batch:
-                text = subject + " " + body
-                entities = extract_entities(text)
-
-                for entity in entities:
-                    if not G.has_node(entity):
-                        G.add_node(entity, weight=1)
-                    else:
-                        G.nodes[entity]['weight'] += 1
-
-                for i in range(len(entities)):
-                    for j in range(i+1, len(entities)):
-                        if G.has_edge(entities[i], entities[j]):
-                            G[entities[i]][entities[j]]['weight'] += 1
-                        else:
-                            G.add_edge(entities[i], entities[j], weight=1)
-
-            total_processed += len(batch)
-            logger.info(f"Processed {total_processed} emails")
-
-        return len(G.nodes), len(G.edges)
-    except Exception as e:
-        app_monitor.log_error()
-        logger.error(f"Error in build_relationship_graph: {e}")
-        raise
-
-def get_relationship_data():
-    return json.dumps(nx.node_link_data(G))
-
-def get_most_connected_entities(top_n=10):
-    return sorted(G.degree, key=lambda x: x[1], reverse=True)[:top_n]
 
 
 def get_sentiment_statistics():
@@ -1101,7 +1311,7 @@ def generate_report(output_file):
     try:
         topics = perform_topic_modeling()
         sentiment_stats = get_sentiment_statistics()
-        top_entities = get_most_connected_entities()
+        top_entities = get_most_connected_entities(G)
         
         doc = SimpleDocTemplate(output_file, pagesize=letter)
         styles = getSampleStyleSheet()

@@ -19,7 +19,10 @@ from Postgres.App_Function_Libraries.Bloodhound_Investigator_Backend import (ana
                                                                              validate_input_decorator, get_email_by_id,
                                                                              analyze_email, analyze_email_thread,
                                                                              analyze_sentiment_trend,
-                                                                             store_email_analysis, build_lda_model)
+                                                                             store_email_analysis, build_lda_model,
+                                                                             batch_analyze_emails,
+                                                                             get_most_connected_users,
+                                                                             get_network_communities, classify_email)
 #
 # Third-Party Imports
 import gradio as gr
@@ -388,5 +391,27 @@ def create_gradio_interface():
             thread_analyze_button.click(analyze_thread_interface, inputs=thread_id_input, outputs=thread_analysis_output)
             sentiment_trend_button.click(analyze_sentiment_trend_interface, inputs=[start_date_input, end_date_input],
                                          outputs=sentiment_trend_output)
+            gr.Markdown("### Batch Processing")
+            batch_size_input = gr.Number(label="Batch Size", value=100)
+            batch_process_button = gr.Button("Run Batch Analysis")
+            batch_process_output = gr.Textbox(label="Batch Process Result")
+
+            gr.Markdown("### Social Network Analysis")
+            top_n_input = gr.Number(label="Top N Users", value=10)
+            get_connected_users_button = gr.Button("Get Most Connected Users")
+            connected_users_output = gr.Textbox(label="Most Connected Users")
+
+            get_communities_button = gr.Button("Get Email Communities")
+            communities_output = gr.Textbox(label="Email Communities")
+
+            gr.Markdown("### Email Classification")
+            email_body_input = gr.Textbox(label="Email Body")
+            classify_email_button = gr.Button("Classify Email")
+            classification_output = gr.Textbox(label="Email Category")
+
+            batch_process_button.click(batch_analyze_emails, inputs=batch_size_input, outputs=batch_process_output)
+            get_connected_users_button.click(get_most_connected_users, inputs=top_n_input, outputs=connected_users_output)
+            get_communities_button.click(get_network_communities, outputs=communities_output)
+            classify_email_button.click(classify_email, inputs=email_body_input, outputs=classification_output)
 
     return demo
