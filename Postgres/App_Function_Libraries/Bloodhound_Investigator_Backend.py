@@ -614,7 +614,17 @@ async def process_emails_async(emails):
     tasks = [asyncio.create_task(process_single_email(email)) for email in emails]
     await asyncio.gather(*tasks)
 
+
 # FIXME: This function is not yet implemented
+async def analyze_sentiment_async(email):
+    pass
+
+
+# FIXME: This function is not yet implemented
+async def extract_entities_async(email):
+    pass
+
+
 async def process_single_email(email):
     # Perform various analysis tasks on a single email
     await analyze_sentiment_async(email)
@@ -686,7 +696,11 @@ def get_relationship_data():
 def get_most_connected_entities(top_n=10):
     return sorted(G.degree, key=lambda x: x[1], reverse=True)[:top_n]
 
-# Report Generation
+# FIXME: This function is not yet implemented
+def get_sentiment_statistics():
+    pass
+
+
 def generate_report(output_file):
     app_monitor.log_request()
     try:
