@@ -7,6 +7,10 @@
 - [Install/Setup](#install)
 - [Plans](#plans)
 ---------------------------------------------------------------------------------
+
+https://anyblockers.com/posts/postgres-as-a-search-engine
+
+
 https://github.com/rotationalio/tribe
 https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage-agent
 https://aleph.occrp.org/
