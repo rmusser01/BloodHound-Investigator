@@ -9,7 +9,8 @@
 ---------------------------------------------------------------------------------
 https://github.com/rotationalio/tribe
 https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage-agent
-
+https://aleph.occrp.org/
+https://gitlab.com/tech-inquiry/InfluenceExplorer/
 
 ---------------------------------------------------------------------------------
 ### 101/What is this?<a name="what"></a>
