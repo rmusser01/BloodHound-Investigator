@@ -13,6 +13,7 @@ https://anyblockers.com/posts/postgres-as-a-search-engine
 
 https://github.com/rotationalio/tribe
 https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage-agent
+https://github.com/urchade/GLiNER
 https://aleph.occrp.org/
 https://gitlab.com/tech-inquiry/InfluenceExplorer/
 
