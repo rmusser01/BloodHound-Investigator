@@ -8,19 +8,20 @@
 - [Plans](#plans)
 ---------------------------------------------------------------------------------
 
+https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage-agent
+https://github.com/AI-Voodoo/Red_Reaper_v2
+
 https://anyblockers.com/posts/postgres-as-a-search-engine
 
-
-https://github.com/rotationalio/tribe
-https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage-agent
 https://github.com/urchade/GLiNER
+https://github.com/rotationalio/tribe
 https://aleph.occrp.org/
 https://gitlab.com/tech-inquiry/InfluenceExplorer/
 
 ---------------------------------------------------------------------------------
 ### 101/What is this?<a name="what"></a>
 - This is a simple application that is capable of performing the following:
-	* Import a collection of emails as (X FIXME),
+  * Import a collection of emails as (X FIXME),
 	* Perform analysis of said emails,
 	* Identify topics of discussion,
 	* Identify 'red flag' items, 
