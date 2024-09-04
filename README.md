@@ -12,6 +12,9 @@ https://www.cybermongol.ca/frontier-research/red-reaper-building-an-ai-espionage
 https://github.com/AI-Voodoo/Red_Reaper_v2
 
 https://anyblockers.com/posts/postgres-as-a-search-engine
+https://xata.io/blog/postgres-full-text-search-postgres-vs-elasticsearch
+https://gist.github.com/tsg/bc64fcea28fca844db11c65b9b1cb4ca
+https://github.com/ovidiugiorgi/csv2opensearch
 
 https://github.com/urchade/GLiNER
 https://github.com/rotationalio/tribe
