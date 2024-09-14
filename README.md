@@ -15,7 +15,8 @@ https://anyblockers.com/posts/postgres-as-a-search-engine
 https://xata.io/blog/postgres-full-text-search-postgres-vs-elasticsearch
 https://gist.github.com/tsg/bc64fcea28fca844db11c65b9b1cb4ca
 https://github.com/ovidiugiorgi/csv2opensearch
-
+https://towardsdatascience.com/how-to-create-a-powerful-ai-email-search-for-gmail-with-rag-88d2bdb1aedc
+https://github.com/EivindKjosbakken/maildiscoverer
 https://github.com/urchade/GLiNER
 https://github.com/rotationalio/tribe
 https://aleph.occrp.org/
