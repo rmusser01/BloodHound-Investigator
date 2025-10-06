@@ -1,4 +1,5 @@
-# BloodHound Investigator (WIP - Not currently working)
+# BloodHound Investigator (DEPRECATED - Work on this has migrated to tldw_server, as the featureset of tldw_server has come to supersede the intended functionality of this application.
+
 
 ---------------------------------------------------------------------------------
 ## Table of Contents
@@ -58,5 +59,6 @@ https://gitlab.com/tech-inquiry/InfluenceExplorer/
 - Make it more robust.
 - Make it less shitty.
 ---------------------------------------------------------------------------------
+
 
 
